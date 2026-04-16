@@ -190,13 +190,12 @@
         const formatterUSD = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
         const formatterIDR = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 });
 
-        // Parsing Parameter URL
+        // Parsing Parameter URL (Dikirim dari index.html)
         const urlParams = new URLSearchParams(window.location.search);
         const coinType = urlParams.get('type');
         const symbol = urlParams.get('symbol') || 'SUI';
         const name = urlParams.get('name') || 'Sui';
         const balance = parseFloat(urlParams.get('balance')) || 0;
-        const cgId = urlParams.get('cgId');
 
         // Menentukan Ikon
         let iconUrl = `https://ui-avatars.com/api/?name=${symbol}&background=11141D&color=14F195`;
@@ -209,51 +208,90 @@
         document.getElementById('coin-icon').src = iconUrl;
         document.getElementById('chart-title').innerText = `${symbol.toUpperCase()}/USDT`;
         
-        // Update Saldo
+        // Update Saldo (Koin yang dimiliki)
         document.getElementById('owned-balance').innerText = balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 }) + ' ' + symbol.toUpperCase();
         document.querySelector('.history-amount').innerText = (balance > 10 ? (balance / 2).toFixed(2) : balance.toFixed(2)) + ' ' + symbol.toUpperCase(); // Mock data riwayat
 
-        // Fetch Harga dari CoinGecko
+        // Fetch Harga (Menggunakan DexScreener sesuai dengan Index.html)
         async function fetchPrice() {
-            if (!cgId) {
+            if (!coinType) {
                 renderEmptyPrice();
                 return;
             }
-            try {
-                const response = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd,idr&include_24hr_change=true`);
-                const data = await response.json();
-                
-                if (data[cgId]) {
-                    const priceUsd = data[cgId].usd;
-                    const priceIdr = data[cgId].idr;
-                    const change24h = data[cgId].usd_24h_change || 0;
-                    
-                    // Kalkulasi Total Value
-                    const totalUsd = balance * priceUsd;
-                    const totalIdr = balance * priceIdr;
 
-                    // Render Harga
+            let priceUsd = 0;
+            let priceChange24h = 0;
+            let idrRate = 16000; // Harga default IDR
+
+            try {
+                // 1. Ambil Kurs USD ke IDR dari CoinGecko
+                const cgRate = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=usd-coin&vs_currencies=idr');
+                const cgData = await cgRate.json();
+                if (cgData['usd-coin'] && cgData['usd-coin'].idr) {
+                    idrRate = cgData['usd-coin'].idr;
+                }
+            } catch (e) {
+                console.warn("Gagal mengambil kurs IDR, menggunakan nilai default.");
+            }
+
+            try {
+                // 2. Fetch Harga dari DexScreener menggunakan Token Address (Sangat akurat untuk jaringan Sui)
+                const dexRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${coinType}`);
+                const dexData = await dexRes.json();
+                
+                if (dexData && dexData.pairs && dexData.pairs.length > 0) {
+                    // Cari pool dengan liquiditas paling tinggi
+                    let bestPair = dexData.pairs[0];
+                    dexData.pairs.forEach(pair => {
+                        if (parseFloat(pair.liquidity?.usd || 0) > parseFloat(bestPair.liquidity?.usd || 0)) {
+                            bestPair = pair;
+                        }
+                    });
+                    
+                    priceUsd = parseFloat(bestPair.priceUsd || 0);
+                    priceChange24h = parseFloat(bestPair.priceChange?.h24 || 0);
+                } 
+                // Fallback khusus SUI (Karena SUI koin native, DexScreener kadang butuh waktu/ID pool spesifik)
+                else if (coinType === "0x2::sui::SUI") {
+                    const cgSui = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=sui&vs_currencies=usd&include_24hr_change=true');
+                    const cgSuiData = await cgSui.json();
+                    if(cgSuiData.sui) {
+                        priceUsd = cgSuiData.sui.usd;
+                        priceChange24h = cgSuiData.sui.usd_24h_change || 0;
+                    }
+                }
+
+                // Jika harga ditemukan, proses render ke layar
+                if (priceUsd > 0) {
+                    const priceIdr = priceUsd * idrRate;
+                    const totalUsd = balance * priceUsd;
+                    const totalIdr = totalUsd * idrRate;
+
+                    // Render Harga Koin Saat Ini
                     document.getElementById('current-price').innerText = formatterUSD.format(priceUsd);
                     document.getElementById('current-price-idr').innerText = formatterIDR.format(priceIdr);
                     
+                    // Render Persentase Perubahan
                     const changeEl = document.getElementById('price-change');
-                    changeEl.innerText = (change24h > 0 ? '+' : '') + change24h.toFixed(2) + '%';
-                    changeEl.className = `text-sm font-medium px-2 py-1 rounded ${change24h >= 0 ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`;
+                    changeEl.innerText = (priceChange24h > 0 ? '+' : '') + priceChange24h.toFixed(2) + '%';
+                    changeEl.className = `text-sm font-medium px-2 py-1 rounded ${priceChange24h >= 0 ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`;
 
-                    // Render Total Value
+                    // Render Total Nilai Aset Berdasarkan Saldo
                     document.getElementById('total-value-usd').innerText = formatterUSD.format(totalUsd);
                     document.getElementById('total-value-idr').innerText = formatterIDR.format(totalIdr);
                 } else {
                     renderEmptyPrice();
                 }
+
             } catch (error) {
-                console.error("Gagal mengambil harga", error);
+                console.error("Gagal mengambil harga:", error);
                 renderEmptyPrice();
             }
         }
 
+        // Fungsi fallback jika harga tidak ditemukan
         function renderEmptyPrice() {
-            document.getElementById('current-price').innerText = "N/A";
+            document.getElementById('current-price').innerText = "Harga N/A";
             document.getElementById('current-price-idr').innerText = "-";
             document.getElementById('total-value-usd').innerText = "$0.00";
             document.getElementById('total-value-idr').innerText = "Rp 0";
@@ -263,7 +301,7 @@
         function initTradingView() {
             let tvSymbol = "BINANCE:SUIUSDT"; // Default
             
-            // Mapping Exchange TradingView
+            // Mapping Exchange TradingView berdasarkan Symbol Token
             const symUp = symbol.toUpperCase();
             if (symUp === 'WAL') tvSymbol = "BYBIT:WALUSDT";
             else if (symUp === 'SUI') tvSymbol = "BINANCE:SUIUSDT";
@@ -287,7 +325,7 @@
             });
         }
 
-        // Eksekusi
+        // Eksekusi fungsi saat page diload
         fetchPrice();
         initTradingView();
     </script>
